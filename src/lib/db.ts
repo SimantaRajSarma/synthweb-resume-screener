@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import os from "os";
 import path from "path";
 import type { AnalysisResult } from "./schema";
 
@@ -42,10 +43,11 @@ let currentDbPath: string | null = null;
  * Initializes the SQLite database and creates the `analyses` table and indexes if they do not exist.
  */
 export function initDatabase(customPath?: string): Database.Database {
+  const defaultDir = process.env.VERCEL ? os.tmpdir() : process.cwd();
   const resolvedPath =
     customPath ||
     process.env.DB_PATH ||
-    path.join(process.cwd(), "analyses.db");
+    path.join(defaultDir, "analyses.db");
 
   if (dbInstance && currentDbPath === resolvedPath) {
     return dbInstance;
