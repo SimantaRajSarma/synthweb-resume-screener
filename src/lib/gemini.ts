@@ -6,7 +6,13 @@ import {
 } from "./schema";
 import { buildScreeningPrompt, SYSTEM_INSTRUCTION } from "./prompt";
 
-const DEFAULT_MODEL = "gemini-2.5-flash";
+const DEFAULT_MODEL = "gemini-3.8-flash";
+const FALLBACK_MODELS = [
+  "gemini-3.8-flash",
+  "gemini-3-flash-preview",
+  "gemini-2.5-pro",
+  "gemini-2.5-flash",
+];
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_API_RETRIES = 3;
 
@@ -36,6 +42,26 @@ export function cleanJsonResponse(raw: string): string {
   const trimmed = raw.trim();
   const fenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
   return fenceMatch ? fenceMatch[1].trim() : trimmed;
+}
+
+/**
+ * Checks if an error indicates the requested model name is unavailable/deprecated (404).
+ */
+function isModelNotFoundError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const msg =
+    "message" in err && typeof err.message === "string"
+      ? err.message.toLowerCase()
+      : "";
+  const status =
+    "status" in err && typeof err.status === "number" ? err.status : undefined;
+
+  return (
+    status === 404 ||
+    msg.includes("404") ||
+    msg.includes("no longer available") ||
+    msg.includes("not found")
+  );
 }
 
 /**
@@ -76,27 +102,35 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Executes a single Gemini generateContent call with a 30s timeout and exponential backoff
- * on 429 / 5xx / timeout errors.
+ * Executes a single Gemini generateContent call with a 30s timeout, automatic model fallback
+ * if a model is deprecated (404), and exponential backoff on 429 / 5xx / timeout errors.
  */
 async function callGeminiWithBackoff(
   ai: GoogleGenAI,
-  model: string,
+  preferredModel: string,
   prompt: string
 ): Promise<string> {
+  const candidateModels = Array.from(
+    new Set([preferredModel, ...FALLBACK_MODELS])
+  );
+  let modelIndex = 0;
   let lastError: unknown;
 
   for (let attempt = 0; attempt < MAX_API_RETRIES; attempt++) {
+    const activeModel =
+      candidateModels[Math.min(modelIndex, candidateModels.length - 1)];
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
     try {
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(
           () => reject(new Error("Gemini request timed out after 30s")),
           REQUEST_TIMEOUT_MS
-        )
-      );
+        );
+      });
 
       const responsePromise = ai.models.generateContent({
-        model,
+        model: activeModel,
         contents: prompt,
         config: {
           systemInstruction: SYSTEM_INSTRUCTION,
@@ -116,22 +150,37 @@ async function callGeminiWithBackoff(
       return text;
     } catch (err) {
       lastError = err;
+
+      // If the specific model ID is 404/deprecated, immediately switch to the next fallback model
+      if (
+        isModelNotFoundError(err) &&
+        modelIndex < candidateModels.length - 1
+      ) {
+        modelIndex++;
+        attempt--; // Don't burn a backoff retry when switching model names
+        continue;
+      }
+
       if (attempt < MAX_API_RETRIES - 1 && isTransientError(err)) {
         const delayMs = 1000 * Math.pow(2, attempt); // 1s, 2s, 4s
         await sleep(delayMs);
         continue;
       }
       break;
+    } finally {
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
     }
   }
 
   // Never log API keys or full resume text
   const safeReason =
-    lastError instanceof Error ? lastError.message.slice(0, 160) : "Unknown error";
+    lastError instanceof Error ? lastError.message.slice(0, 300) : "Unknown error";
   console.error(`[gemini] API call failed after retries: ${safeReason}`);
 
   throw new GeminiServiceError(
-    "Service busy, please try again in a moment.",
+    "Service busy or unavailable, please try again in a moment.",
     "SERVICE_BUSY",
     503
   );
@@ -154,14 +203,14 @@ export async function analyzeResumeWithGemini(
     );
   }
 
-  const model = process.env.GEMINI_MODEL?.trim() || DEFAULT_MODEL;
+  const preferredModel = process.env.GEMINI_MODEL?.trim() || DEFAULT_MODEL;
   const ai = new GoogleGenAI({ apiKey });
 
   // Up to 2 validation attempts: initial call + 1 retry if JSON or Zod validation fails
   for (let validationAttempt = 0; validationAttempt < 2; validationAttempt++) {
     const isRetry = validationAttempt > 0;
     const prompt = buildScreeningPrompt(jobDescription, resumeText, isRetry);
-    const rawOutput = await callGeminiWithBackoff(ai, model, prompt);
+    const rawOutput = await callGeminiWithBackoff(ai, preferredModel, prompt);
 
     try {
       const cleaned = cleanJsonResponse(rawOutput);

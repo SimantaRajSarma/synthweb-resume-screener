@@ -1,6 +1,6 @@
-# AI Resume Screener Assistant (Next.js + Gemini + SQLite)
+# AI Resume Screener Assistant (Next.js + Claude / Gemini + SQLite)
 
-An AI-powered candidate screening application built with **Next.js (App Router)**, **TypeScript**, **Google Gemini (`@google/genai`)**, **Zod**, and **SQLite (`better-sqlite3`)**.
+An AI-powered candidate screening application built with **Next.js (App Router)**, **TypeScript**, **Anthropic Claude (`@anthropic-ai/sdk`)** + **Google Gemini (`@google/genai`)** behind a strict environment switch (`AI_PROVIDER=claude|gemini`), **Zod**, and **SQLite (`better-sqlite3`)**, styled with the **SynthWeb Bluewave** design system.
 
 Given a job description and a candidate resume (via text paste or `.pdf`/`.txt` upload), the assistant produces a validated structured assessment containing:
 - **Candidate Name**
@@ -17,7 +17,7 @@ All evaluations are persisted locally in SQLite and searchable on the **Screenin
 
 ### Prerequisites
 - **Node.js** v18.18+ (or v20/v22+)
-- A free **Google Gemini API Key** from [Google AI Studio](https://aistudio.google.com/apikey)
+- An **Anthropic Claude API Key** from [Anthropic Console](https://console.anthropic.com/) (or a **Google Gemini API Key** from [Google AI Studio](https://aistudio.google.com/apikey) if running with `AI_PROVIDER=gemini`)
 
 ### Installation & Local Run
 
@@ -27,14 +27,22 @@ All evaluations are persisted locally in SQLite and searchable on the **Screenin
    ```
 
 2. **Configure environment variables:**
-   Copy `.env.example` to `.env.local` and add your Gemini API key:
+   Copy `.env.example` to `.env.local` and configure your active provider (`claude` by default, or switch to `gemini` anytime):
    ```bash
    cp .env.example .env.local
    ```
    Edit `.env.local`:
    ```env
-   GEMINI_API_KEY=your_actual_gemini_api_key_here
-   GEMINI_MODEL=gemini-2.5-flash
+   # Set to "claude" (default) or "gemini"
+   AI_PROVIDER=claude
+
+   # Anthropic Claude Configuration
+   ANTHROPIC_API_KEY=your_anthropic_api_key_here
+   CLAUDE_MODEL=claude-sonnet-5-5
+
+   # Google Gemini Configuration (used when AI_PROVIDER=gemini)
+   GEMINI_API_KEY=your_gemini_api_key_here
+   GEMINI_MODEL=gemini-3.8-flash
    ```
 
 3. **Start the development server:**
@@ -53,7 +61,7 @@ All evaluations are persisted locally in SQLite and searchable on the **Screenin
 ## 2. Architecture Overview
 
 ```
-Browser UI (/ and /history)
+Browser UI (/ Split Workspace and /history Slide-Over Drawer)
    │
    ├── POST /api/analyze (JSON or multipart/form-data with .pdf/.txt)
    │     ├── 1. Input Sanitizer (src/lib/sanitize.ts)
@@ -64,10 +72,13 @@ Browser UI (/ and /history)
    │     ├── 2. Prompt Builder (src/lib/prompt.ts)
    │     │      • Wraps inputs in <job_description> and <resume> tags
    │     │      • Instructs model to treat delimited text strictly as data, never instructions
-   │     ├── 3. Gemini Client (src/lib/gemini.ts)
-   │     │      • Calls @google/genai with JSON responseSchema & temperature 0.2
-   │     │      • 30s timeout + 3x exponential backoff on 429/5xx/network errors
-   │     │      • Validates output with Zod (src/lib/schema.ts); retries once on malformed/invalid shape
+   │     ├── 3. Provider Switch (src/lib/ai.ts)
+   │     │      ├── AI_PROVIDER=claude → Claude Client (src/lib/claude.ts)
+   │     │      │     • Native Structured Outputs (output_config.format: json_schema)
+   │     │      └── AI_PROVIDER=gemini → Gemini Client (src/lib/gemini.ts)
+   │     │            • JSON responseSchema & temperature 0.2
+   │     │      • Both enforce: 30s timeout + 3x exponential backoff on 429/529/5xx
+   │     │      • Both validate output with Zod (src/lib/schema.ts) & retry once on invalid shape
    │     └── 4. SQLite Persistence (src/lib/db.ts)
    │            • Saves record via parameterized INSERT (non-blocking if DB write fails)
    │
@@ -79,12 +90,14 @@ Browser UI (/ and /history)
 
 ## 3. Key Design Decisions
 
+- **Why a Strict `AI_PROVIDER=claude|gemini` Switch (`src/lib/ai.ts`)?**
+  Decoupling the provider dispatch from the route handler allows switching between Anthropic Claude (`@anthropic-ai/sdk`) and Google Gemini (`@google/genai`) via a single `.env.local` variable (`AI_PROVIDER=claude` or `AI_PROVIDER=gemini`) without changing any application or validation logic. Both providers feed into the exact same `AnalysisResultSchema` (Zod) validator.
+- **Why Anthropic Structured Outputs (`output_config.format: json_schema`) + `zod` Validation?**
+  With `claude-sonnet-5-5`, configuring `output_config: { format: { type: "json_schema", schema: claudeAnalysisJsonSchema } }` (`additionalProperties: false`) constrains token generation to valid JSON matching our object structure. We still validate at runtime with `AnalysisResultSchema` (Zod) to enforce exact array counts (`5` matching skills, `3` gaps, `3` questions) and integer score bounds (`0–100`), triggering a self-correcting retry if any constraint is violated.
 - **Why SQLite (`better-sqlite3`)?**
   Zero external infrastructure is required to run or evaluate the project locally, while still providing full relational SQL capabilities, B-tree indexes (`idx_analyses_candidate_name`, `idx_analyses_match_score`), WAL concurrency mode, and strict parameterized queries. For cloud deployment, **Render** (with a persistent disk) is recommended over Vercel because serverless ephemeral filesystems lose SQLite state between cold starts.
-- **Why validate with `zod` even when using Gemini JSON mode + `responseSchema`?**
-  LLM structured output modes constrain token generation syntactically, but models can still occasionally violate semantic invariants (e.g., returning 4 matching skills instead of 5, an out-of-range score like `150`, empty strings, or truncated JSON when hitting token limits). Runtime validation with `AnalysisResultSchema` guarantees that neither the database nor the React UI ever receives malformed data, and triggers a self-correcting retry if the shape is wrong.
 - **Why Exponential Backoff + Separate Schema Retry?**
-  Transient infrastructure failures (`429 Too Many Requests`, `503 Service Unavailable`, network timeouts) require waiting before retrying (`1s → 2s → 4s`), whereas a malformed JSON/schema response requires an immediate corrective prompt reminder. Separating these two retry loops keeps latency low while maximizing reliability.
+  Transient infrastructure failures (`429 Too Many Requests`, `529 Overloaded`, `503 Service Unavailable`, network timeouts) require waiting before retrying (`1s → 2s → 4s`), whereas a malformed JSON/schema response requires an immediate corrective prompt reminder. Separating these two retry loops keeps latency low while maximizing reliability.
 - **Defense-in-Depth Against Prompt Injection:**
   Candidate resumes are untrusted external inputs. We combine four layers of defense:
   1. Neutralizing closing/opening `<resume>` and `<job_description>` tags inside user input so candidates cannot break out of XML delimiters.
@@ -99,9 +112,9 @@ Browser UI (/ and /history)
 Resumes contain sensitive Personally Identifiable Information (PII)—full names, home addresses, phone numbers, email addresses, employment history, and education records. In a production deployment (under GDPR, CCPA, or DPDP regulations), we would implement the following safeguards:
 
 1. **Redaction of PII Before LLM Transmission:**
-   Run a deterministic PII-scrubbing pass (regex + NER for email addresses, phone numbers, physical addresses, and national IDs) before sending resume text to the Gemini API, replacing them with placeholders (`[EMAIL_REDACTED]`, `[PHONE_REDACTED]`).
-2. **LLM Tier & Data Governance (Paid/Enterprise vs. Free Tier):**
-   Google Gemini's **free tier may use submitted prompts and responses to train and improve Google products** and be reviewed by human reviewers. In production, real candidate data **must never be sent to the free tier**—it must be routed exclusively through a **paid Google Cloud Vertex AI or Gemini API Paid Tier** account where zero-data-retention and no-model-training contractual guarantees apply.
+   Run a deterministic PII-scrubbing pass (regex + NER for email addresses, phone numbers, physical addresses, and national IDs) before sending resume text to the LLM API, replacing them with placeholders (`[EMAIL_REDACTED]`, `[PHONE_REDACTED]`).
+2. **LLM Tier & Data Governance (Commercial API vs. Consumer/Free Tier):**
+   Anthropic's commercial API does not train models on customer API data by default, whereas Google Gemini's **free tier may use submitted prompts and responses to train and improve Google products**. In production, real candidate data **must only be sent through commercial/enterprise API tiers** with zero-data-retention and no-model-training contractual guarantees.
 3. **Encryption at Rest and in Transit:**
    Replace plain local SQLite files with encrypted storage (e.g., SQLCipher or managed PostgreSQL with AES-256 disk encryption) and enforce TLS 1.3 for all traffic.
 4. **Role-Based Access Control (RBAC) & Audit Logging:**

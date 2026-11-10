@@ -1,4 +1,4 @@
-# Build Plan: Resume Screener Assistant (Next.js + Gemini)
+# Build Plan: Resume Screener Assistant (Next.js + Claude / Gemini Switch)
 
 A step-by-step plan for the Synthweb AI Product Engineer assessment. Time budget: about 3 hours of effort, return within 48 hours.
 
@@ -9,10 +9,11 @@ A step-by-step plan for the Synthweb AI Product Engineer assessment. Time budget
 | Piece | Choice | Why |
 |---|---|---|
 | Framework | Next.js (App Router) + TypeScript | Frontend and API routes in one repo |
-| LLM | Gemini API (current Flash model; check Google AI Studio for the latest name) via the `@google/genai` SDK | Free tier, supports JSON-mode output |
+| LLM | Anthropic Claude (`claude-sonnet-5-5` via `@anthropic-ai/sdk`) as primary + Google Gemini (`gemini-3.8-flash` via `@google/genai`) behind `AI_PROVIDER=claude\|gemini` switch | Native structured JSON output + instant provider switching |
 | Validation | `zod` | Checks the AI's JSON shape |
 | Database | SQLite via `better-sqlite3` | Simple, file-based, allowed by the task |
 | File upload | `pdf-parse` (PDF), plain read for .txt | Optional, do it last |
+| UI Design | SynthWeb Bluewave (`synthweb.in-design.md`) | High-trust consulting aesthetic with responsive split workspace & drawer |
 | Tests | `vitest` | Fast, earns bonus points |
 | Deploy (bonus) | Render | Vercel has no persistent disk, so SQLite data would be lost there |
 
@@ -51,15 +52,21 @@ This is the 20-point area, so spend your effort here.
 ```
 src/
   app/
-    page.tsx                 (input screen)
-    history/page.tsx         (history page)
+    page.tsx                 (split workspace: input screen + live report)
+    history/page.tsx         (history page with filters, mobile cards & slide-over drawer)
     api/analyze/route.ts     (POST)
     api/analyses/route.ts    (GET with filters)
+    api/analyses/[id]/route.ts (GET single analysis detail)
+  components/
+    NavBar.tsx               (SynthWeb branded 70px navigation bar)
+    AnalysisReportCard.tsx   (structured report card component)
   lib/
-    gemini.ts                (LLM call + retry)
-    schema.ts                (zod schema)
-    prompt.ts                (prompt builder)
-    db.ts                    (SQLite setup + queries)
+    ai.ts                    (AI_PROVIDER=claude|gemini dispatcher)
+    claude.ts                (Claude Structured Output call + backoff retry)
+    gemini.ts                (Gemini JSON call + backoff retry)
+    schema.ts                (Zod schema + Claude & Gemini JSON schemas)
+    prompt.ts                (prompt builder with XML delimiters)
+    db.ts                    (SQLite setup + parameterized queries)
     sanitize.ts              (truncation + injection checks)
 ```
 

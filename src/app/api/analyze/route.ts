@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sanitizeInputs } from "@/lib/sanitize";
-import { analyzeResumeWithGemini, GeminiServiceError } from "@/lib/gemini";
+import { analyzeResume, AIServiceError } from "@/lib/ai";
 import { insertAnalysis } from "@/lib/db";
 
 export const runtime = "nodejs";
+
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
 
 async function extractTextFromUploadedFile(
   file: File
@@ -11,7 +13,16 @@ async function extractTextFromUploadedFile(
   if (file.size === 0) {
     return {
       ok: false,
-      error: "The uploaded file is empty. Please upload a valid .pdf or .txt file.",
+      error:
+        "The uploaded file is empty. Please upload a valid .pdf or .txt file.",
+    };
+  }
+
+  if (file.size > MAX_UPLOAD_BYTES) {
+    return {
+      ok: false,
+      error:
+        "The uploaded file exceeds the 10 MB limit. Please upload a smaller .pdf or .txt file.",
     };
   }
 
@@ -42,7 +53,6 @@ async function extractTextFromUploadedFile(
   try {
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
-    // Import pdf-parse dynamically inside Node runtime
     const pdfParseModule = await import("pdf-parse");
     const pdfParse = pdfParseModule.default ?? pdfParseModule;
     const parsed = await pdfParse(buffer);
@@ -84,9 +94,16 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: extracted.error }, { status: 400 });
         }
         rawResumeText = extracted.text;
-      } else if (resumeFile instanceof File && resumeFile.size === 0 && resumeFile.name) {
+      } else if (
+        resumeFile instanceof File &&
+        resumeFile.size === 0 &&
+        resumeFile.name
+      ) {
         return NextResponse.json(
-          { error: "The uploaded file is empty. Please choose a non-empty .pdf or .txt file." },
+          {
+            error:
+              "The uploaded file is empty. Please choose a non-empty .pdf or .txt file.",
+          },
           { status: 400 }
         );
       } else {
@@ -124,8 +141,11 @@ export async function POST(req: NextRequest) {
       injectionReasons,
     } = sanitizedResult.data;
 
-    // 2. Call Gemini with retry + Zod validation
-    const analysis = await analyzeResumeWithGemini(jobDescription, resumeText);
+    // 2. Call active AI provider (Claude by default, or Gemini when AI_PROVIDER=gemini)
+    const { result: analysis, provider } = await analyzeResume(
+      jobDescription,
+      resumeText
+    );
 
     const warnings: string[] = [];
     if (wasTruncated) {
@@ -181,6 +201,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       id: savedRecordId,
       savedToDb,
+      provider,
       analysis,
       meta: {
         wasTruncated,
@@ -191,7 +212,7 @@ export async function POST(req: NextRequest) {
       },
     });
   } catch (err) {
-    if (err instanceof GeminiServiceError) {
+    if (err instanceof AIServiceError) {
       return NextResponse.json(
         { error: err.message, code: err.code },
         { status: err.statusCode }

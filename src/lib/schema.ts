@@ -3,7 +3,7 @@ import { Type, type Schema } from "@google/genai";
 
 /**
  * Strict Zod schema for the AI Resume Screener output.
- * Enforces exact array counts and integer score bounds (0-100).
+ * Enforces exact array counts and integer score bounds (0-100) across both Claude and Gemini.
  */
 export const AnalysisResultSchema = z.object({
   candidate_name: z
@@ -29,9 +29,54 @@ export const AnalysisResultSchema = z.object({
 export type AnalysisResult = z.infer<typeof AnalysisResultSchema>;
 
 /**
+ * Anthropic Claude Structured Output JSON Schema (`output_config.format`).
+ * Follows Anthropic's strict JSON Schema specification (`additionalProperties: false`).
+ */
+export const claudeAnalysisJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    candidate_name: {
+      type: "string",
+      description:
+        "Full name of the candidate extracted from the resume, or 'Unknown Candidate' if not present.",
+    },
+    match_score: {
+      type: "integer",
+      description:
+        "Overall fit score as an integer from 0 to 100 based on the rubric (0-30 poor, 31-60 partial, 61-80 good, 81-100 excellent).",
+    },
+    matching_skills: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Array of EXACTLY 5 strings representing key matching skills, qualifications, or relevant experiences found in the resume.",
+    },
+    gaps: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Array of EXACTLY 3 strings representing missing skills, experience gaps, or areas of concern relative to the job description.",
+    },
+    interview_questions: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Array of EXACTLY 3 strings representing tailored interview questions designed to probe the candidate's gaps and verify their claimed strengths.",
+    },
+  },
+  required: [
+    "candidate_name",
+    "match_score",
+    "matching_skills",
+    "gaps",
+    "interview_questions",
+  ],
+};
+
+/**
  * Gemini responseSchema definition matching AnalysisResultSchema.
- * Even when using Gemini JSON mode with this schema, we still validate with Zod
- * at runtime because LLM outputs should never be trusted blindly.
+ * Kept ready for whenever AI_PROVIDER=gemini is selected.
  */
 export const geminiAnalysisResponseSchema: Schema = {
   type: Type.OBJECT,

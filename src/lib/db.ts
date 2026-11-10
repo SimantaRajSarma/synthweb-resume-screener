@@ -146,8 +146,9 @@ export function searchAnalyses(
   const params: (string | number)[] = [];
 
   if (filters.name && filters.name.trim() !== "") {
-    conditions.push("LOWER(candidate_name) LIKE LOWER(?)");
-    params.push(`%${filters.name.trim()}%`);
+    const escapedName = filters.name.trim().replace(/[\\%_]/g, "\\$&");
+    conditions.push("LOWER(candidate_name) LIKE LOWER(?) ESCAPE '\\'");
+    params.push(`%${escapedName}%`);
   }
 
   if (

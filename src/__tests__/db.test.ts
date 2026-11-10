@@ -73,12 +73,15 @@ describe("SQLite Database & History Filtering", () => {
       expect.arrayContaining(["Rahul Sharma", "Priya Patel"])
     );
 
-    // 3. Verify SQL injection attempt in name parameter is safely parameterized
+    // 3. Verify SQL injection attempt & wildcard escaping in name parameter
     const injectionSearch = searchAnalyses(
       { name: "'; DROP TABLE analyses; --" },
       db
     );
     expect(injectionSearch).toHaveLength(0);
+
+    const wildcardSearch = searchAnalyses({ name: "100%" }, db);
+    expect(wildcardSearch).toHaveLength(0);
 
     // Table still intact
     const allRows = searchAnalyses({}, db);
