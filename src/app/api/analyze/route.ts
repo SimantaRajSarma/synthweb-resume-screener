@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { sanitizeInputs } from "@/lib/sanitize";
 import { analyzeResume, AIServiceError } from "@/lib/ai";
 import { insertAnalysis } from "@/lib/db";
+import { checkAndConsumeRateLimit } from "@/lib/rateLimit";
 
 export const runtime = "nodejs";
 
@@ -141,7 +142,35 @@ export async function POST(req: NextRequest) {
       injectionReasons,
     } = sanitizedResult.data;
 
-    // 2. Call active AI provider (Claude by default, or Gemini when AI_PROVIDER=gemini)
+    // 2. Enforce 10 requests / hour rate limit before calling the LLM API
+    const forwardedFor = req.headers.get("x-forwarded-for");
+    const clientIp =
+      (forwardedFor ? forwardedFor.split(",")[0]?.trim() : null) ||
+      req.headers.get("x-real-ip") ||
+      "anonymous";
+
+    const rateLimit = checkAndConsumeRateLimit(clientIp);
+    if (!rateLimit.allowed) {
+      const retryMins = Math.max(1, Math.ceil(rateLimit.retryAfterSeconds / 60));
+      return NextResponse.json(
+        {
+          error: `Hourly rate limit reached (${rateLimit.limit} analyses per hour to protect live API credits). Please try again in ~${retryMins} minute${retryMins === 1 ? "" : "s"}.`,
+          code: "RATE_LIMIT_EXCEEDED",
+          retryAfterSeconds: rateLimit.retryAfterSeconds,
+        },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(rateLimit.retryAfterSeconds),
+            "X-RateLimit-Limit": String(rateLimit.limit),
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset": String(Math.ceil(rateLimit.resetAtMs / 1000)),
+          },
+        }
+      );
+    }
+
+    // 3. Call active AI provider (Claude by default, or Gemini when AI_PROVIDER=gemini)
     const { result: analysis, provider } = await analyzeResume(
       jobDescription,
       resumeText
@@ -198,19 +227,32 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    return NextResponse.json({
-      id: savedRecordId,
-      savedToDb,
-      provider,
-      analysis,
-      meta: {
-        wasTruncated,
-        truncatedFields,
-        injectionDetected,
-        injectionReasons,
-        warnings,
+    return NextResponse.json(
+      {
+        id: savedRecordId,
+        savedToDb,
+        provider,
+        analysis,
+        meta: {
+          wasTruncated,
+          truncatedFields,
+          injectionDetected,
+          injectionReasons,
+          warnings,
+          rateLimit: {
+            limit: rateLimit.limit,
+            remaining: rateLimit.remaining,
+          },
+        },
       },
-    });
+      {
+        headers: {
+          "X-RateLimit-Limit": String(rateLimit.limit),
+          "X-RateLimit-Remaining": String(rateLimit.remaining),
+          "X-RateLimit-Reset": String(Math.ceil(rateLimit.resetAtMs / 1000)),
+        },
+      }
+    );
   } catch (err) {
     if (err instanceof AIServiceError) {
       return NextResponse.json(
